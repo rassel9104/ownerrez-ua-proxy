@@ -4,10 +4,10 @@ import { URL } from "url";
 
 const app = express();
 
-// 🔧 Identificador requerido por OwnerRez en TODAS las llamadas
+// 👇 User-Agent obligatorio para OwnerRez
 const UA = "DenOfSin Assistant/1.0 (c_otce6nb6iejzqvmtk7hiaunuhtlwyq6g)";
 
-// ✅ Fallbacks (también puedes setearlos como Environment Variables en Render)
+// 👇 Fallbacks (puedes ponerlos como env vars en Render)
 const FALLBACK_CLIENT_ID =
     process.env.OWNERREZ_CLIENT_ID || "c_otce6nb6iejzqvmtk7hiaunuhtlwyq6g";
 const FALLBACK_REDIRECT =
@@ -17,10 +17,10 @@ const FALLBACK_REDIRECT =
 // Salud
 app.get("/__health", (req, res) => res.json({ ok: true }));
 
-// Acepta cualquier body (incluye x-www-form-urlencoded del token endpoint)
+// Acepta cualquier body (x-www-form-urlencoded, json, binario)
 app.use(express.raw({ type: () => true, limit: "10mb" }));
 
-// ---- utilidades ----
+// ---------- utilidades ----------
 function buildHeaders(req) {
     const headers = {};
     for (const [k, v] of Object.entries(req.headers)) {
@@ -47,50 +47,74 @@ async function forward(req, res, targetBase) {
 }
 
 function isWebPath(pathname) {
-    // Rutas que pertenecen al sitio web (no a la API) de OwnerRez:
+    // Rutas propias del sitio web de OwnerRez (no API)
     return (
-        pathname.startsWith("/oauth/") || // /oauth/authorize, callbacks, etc.
+        pathname.startsWith("/oauth/") ||
         pathname === "/oauth" ||
         pathname.startsWith("/login") ||
         pathname.startsWith("/signin") ||
         pathname.startsWith("/account") ||
         pathname.startsWith("/identity") ||
-        pathname === "/" // raíz si la UI redirige
+        pathname === "/"
     );
 }
 
-// ---- ruteo OAuth / API ----
+// ---------- Handlers específicos ----------
 
-// Token SIEMPRE contra API
+// 1) TOKEN: siempre contra la API
 app.all("/oauth/access_token", (req, res) =>
     forward(req, res, "https://api.ownerrez.com")
 );
 
-// Authorize: rellena client_id / redirect_uri si vinieran vacíos y envía a APP
+// 2) AUTHORIZE: completa client_id/redirect_uri si faltan y envía a APP
 app.all("/oauth/authorize", async (req, res) => {
     const incoming = new URL(req.url, "https://proxy.local");
     const q = incoming.searchParams;
 
-    // Si no viene client_id o viene vacío, lo fijamos
     if (!q.get("client_id") || q.get("client_id").trim() === "") {
         q.set("client_id", FALLBACK_CLIENT_ID);
     }
-    // Si no viene redirect_uri o viene vacío, lo fijamos
     if (!q.get("redirect_uri") || q.get("redirect_uri").trim() === "") {
         q.set("redirect_uri", FALLBACK_REDIRECT);
     }
-    // Asegura response_type=code
     if (!q.get("response_type")) q.set("response_type", "code");
 
-    // Reconstruye URL local con los parámetros corregidos
-    req.url = "/oauth/authorize?" + q.toString();
-
+    req.url = "/oauth/authorize?" + q.toString(); // reescribe con params corregidos
     return forward(req, res, "https://app.ownerrez.com");
 });
 
-// Catch-all:
-// - Si es ruta "web" → APP
-// - Si es API (/v2/...) → API
+// 3) LOGIN: si viene con returnUrl=oauth/authorize?... y client_id vacío,
+//    reescribe el returnUrl para incluir client_id/redirect_uri y envía a APP
+app.all("/login", async (req, res) => {
+    const incoming = new URL(req.url, "https://proxy.local");
+    const returnUrl = incoming.searchParams.get("returnUrl") || "";
+
+    // Solo intervenimos si apunta al flujo de authorize
+    if (returnUrl.startsWith("oauth/authorize") || returnUrl.startsWith("/oauth/authorize")) {
+        // Normaliza a URL absoluta para manipular query interna
+        const inner = new URL(
+            returnUrl.startsWith("/") ? `https://proxy.local${returnUrl}` : `https://proxy.local/${returnUrl}`
+        );
+        const iq = inner.searchParams;
+
+        if (!iq.get("client_id") || iq.get("client_id").trim() === "") {
+            iq.set("client_id", FALLBACK_CLIENT_ID);
+        }
+        if (!iq.get("redirect_uri") || iq.get("redirect_uri").trim() === "") {
+            iq.set("redirect_uri", FALLBACK_REDIRECT);
+        }
+        if (!iq.get("response_type")) iq.set("response_type", "code");
+
+        // Reescribe la URL local para que forward use la versión corregida
+        req.url = "/oauth/authorize?" + iq.toString();
+        return forward(req, res, "https://app.ownerrez.com");
+    }
+
+    // Si no es el caso anterior, solo proxy a APP
+    return forward(req, res, "https://app.ownerrez.com");
+});
+
+// 4) Catch-all: web → APP, resto → API
 app.use((req, res) => {
     const pathname = new URL(req.url, "https://proxy.local").pathname;
     if (isWebPath(pathname)) {
