@@ -57,56 +57,46 @@ async function proxyGeneric(req, res, targetBase) {
     res.status(resp.status).send(buf);
 }
 
-// -------- TOKEN (único handler): fuerza POST + Basic + body form completo --------
 app.all("/oauth/access_token", async (req, res) => {
     try {
-        // Cabeceras obligatorias
+        if (!CLIENT_SECRET) return res.status(500).json({ error: "OWNERREZ_CLIENT_SECRET not configured" });
+
         const headers = {
             "User-Agent": UA,
             "Content-Type": "application/x-www-form-urlencoded",
-            "Accept": "application/json"
+            "Accept": "application/json",
+            "Authorization": "Basic " + Buffer.from(`${CLIENT_ID}:${CLIENT_SECRET}`).toString("base64")
         };
 
-        if (!CLIENT_SECRET) {
-            return res.status(500).json({ error: "OWNERREZ_CLIENT_SECRET not configured" });
-        }
+        // 1) Lee el body original (ChatGPT envía form-urlencoded con grant_type, code, redirect_uri)
+        const raw = req.body ? req.body.toString("utf8") : "";
+        const inParams = new URLSearchParams(raw || "");
 
-        // Authorization: Basic <client_id:client_secret>
-        const basic = Buffer.from(`${CLIENT_ID}:${CLIENT_SECRET}`).toString("base64");
-        headers["Authorization"] = `Basic ${basic}`;
-
-        // Extraer "code" del body (form) o de la query
-        let code = "";
-        let bodyRaw = req.body ? req.body.toString("utf8") : "";
-        if (bodyRaw && bodyRaw.includes("=")) {
-            const search = new URLSearchParams(bodyRaw);
-            code = search.get("code") || "";
-        }
-        if (!code) {
+        // 2) Extrae code y redirect_uri del body o, si faltaran, de la query (fallback)
+        let code = inParams.get("code");
+        let redirect_uri = inParams.get("redirect_uri");
+        if (!code) { const u = new URL(req.url, PROXY_ORIGIN); code = u.searchParams.get("code") || ""; }
+        if (!redirect_uri) {
             const u = new URL(req.url, PROXY_ORIGIN);
-            code = u.searchParams.get("code") || "";
+            redirect_uri = u.searchParams.get("redirect_uri") || process.env.GPT_REDIRECT_URI || "";
         }
-        if (!code) {
-            return res.status(400).json({ error: "missing_authorization_code" });
-        }
+        if (!code) return res.status(400).json({ error: "missing_authorization_code" });
+        if (!redirect_uri) return res.status(400).json({ error: "missing_redirect_uri" });
 
-        // Construir SIEMPRE el form esperado por OwnerRez
+        // 3) Construye el form EXACTO preservando el redirect_uri actual del asistente
         const form = new URLSearchParams();
         form.set("grant_type", "authorization_code");
         form.set("code", code);
-        form.set("redirect_uri", REDIRECT_URI);
-        // (compat) añade client creds en el form
-        form.set("client_id", CLIENT_ID);
-        form.set("client_secret", CLIENT_SECRET);
+        form.set("redirect_uri", redirect_uri);
 
         const resp = await fetch(API_BASE + "/oauth/access_token", {
-            method: "POST",                // <-- fuerza POST
+            method: "POST",
             headers,
             body: form.toString(),
             redirect: "manual"
         });
 
-        // Proxy de respuesta tal cual
+        // 4) Devuelve tal cual
         for (const [k, v] of resp.headers.entries()) res.setHeader(k, v);
         const buf = Buffer.from(await resp.arrayBuffer());
         res.status(resp.status).send(buf);
