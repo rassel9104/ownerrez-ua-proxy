@@ -135,6 +135,39 @@ function isWebPath(path) {
         path === "/"
     );
 }
+// ---- GPT shim: POST /gpt/spotrates/patch  ->  PATCH /v2/spotrates (array body) ----
+app.post("/gpt/spotrates/patch", async (req, res) => {
+    try {
+        const headers = {
+            ...cloneHeaders(req),
+            "Content-Type": "application/json",
+            "Accept": "application/json"
+        };
+        // body esperado desde GPT: { "items": [ { property_id, date, amount, ... }, ... ] }
+        const raw = req.body ? req.body.toString("utf8") : "";
+        let items = [];
+        try {
+            const obj = raw ? JSON.parse(raw) : {};
+            items = Array.isArray(obj?.items) ? obj.items : [];
+        } catch { /* ignore */ }
+
+        if (!Array.isArray(items) || items.length === 0) {
+            return res.status(400).json({ error: "invalid_body", hint: "Expected { items: SpotRatePatch[] }" });
+        }
+
+        const resp = await fetch(API_BASE + "/v2/spotrates", {
+            method: "PATCH",
+            headers,
+            body: JSON.stringify(items),
+            redirect: "manual"
+        });
+        for (const [k, v] of resp.headers.entries()) res.setHeader(k, v);
+        const buf = Buffer.from(await resp.arrayBuffer());
+        res.status(resp.status).send(buf);
+    } catch (err) {
+        res.status(502).json({ error: "spotrates_shim_error", detail: String(err) });
+    }
+});
 
 app.use((req, res) => {
     const pathname = new URL(req.url, PROXY_ORIGIN).pathname;
