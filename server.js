@@ -16,7 +16,7 @@ const CLIENT_ID = process.env.OWNERREZ_CLIENT_ID || "c_otce6nb6iejzqvmtk7hiaunuh
 const CLIENT_SECRET = process.env.OWNERREZ_CLIENT_SECRET || ""; // <-- IMPORTANTE
 const REDIRECT_URI =
     process.env.GPT_REDIRECT_URI ||
-    "https://chat.openai.com/aip/g-4c7fcb8735f81f7eda9337dc66fdc10c530695c2/oauth/callback";
+    "https://chatgpt.com/aip/g-4c7fcb8735f81f7eda9337dc66fdc10c530695c2/oauth/callback";
 
 // Salud
 app.get("/__health", (req, res) => res.json({ ok: true }));
