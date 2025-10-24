@@ -13,10 +13,10 @@ app.get("/__health", (req, res) => {
 app.use(express.raw({ type: "*/*", limit: "10mb" }));
 
 // Proxy: inyecta User-Agent
-app.all("/:proxyPath*", async (req, res) => {
+app.all("/*", async (req, res) => {
     try {
-        // Reemplazamos el * con el parámetro de ruta proxyPath
-        const targetUrl = TARGET_BASE + "/" + req.params.proxyPath + req.originalUrl.replace(`/${req.params.proxyPath}`, "");
+        // Reemplazamos el * con la ruta completa
+        const targetUrl = TARGET_BASE + req.originalUrl;
 
         const headers = {};
         for (const [k, v] of Object.entries(req.headers)) {
