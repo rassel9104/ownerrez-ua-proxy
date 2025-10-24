@@ -57,6 +57,7 @@ async function proxyGeneric(req, res, targetBase) {
     res.status(resp.status).send(buf);
 }
 
+// 2) LOG en /oauth/access_token para verificar que ChatGPT nos manda code y redirect_uri
 app.all("/oauth/access_token", async (req, res) => {
     try {
         if (!CLIENT_SECRET) return res.status(500).json({ error: "OWNERREZ_CLIENT_SECRET not configured" });
@@ -68,48 +69,50 @@ app.all("/oauth/access_token", async (req, res) => {
             "Authorization": "Basic " + Buffer.from(`${CLIENT_ID}:${CLIENT_SECRET}`).toString("base64")
         };
 
-        // 1) Lee el body original (ChatGPT envía form-urlencoded con grant_type, code, redirect_uri)
         const raw = req.body ? req.body.toString("utf8") : "";
         const inParams = new URLSearchParams(raw || "");
-
-        // 2) Extrae code y redirect_uri del body o, si faltaran, de la query (fallback)
         let code = inParams.get("code");
         let redirect_uri = inParams.get("redirect_uri");
+
         if (!code) { const u = new URL(req.url, PROXY_ORIGIN); code = u.searchParams.get("code") || ""; }
-        if (!redirect_uri) {
-            const u = new URL(req.url, PROXY_ORIGIN);
-            redirect_uri = u.searchParams.get("redirect_uri") || process.env.GPT_REDIRECT_URI || "";
-        }
+        if (!redirect_uri) { const u = new URL(req.url, PROXY_ORIGIN); redirect_uri = u.searchParams.get("redirect_uri") || process.env.GPT_REDIRECT_URI || ""; }
+
+        console.log("TOKEN ▶︎", { has_code: !!code, redirect_uri });
+
         if (!code) return res.status(400).json({ error: "missing_authorization_code" });
         if (!redirect_uri) return res.status(400).json({ error: "missing_redirect_uri" });
 
-        // 3) Construye el form EXACTO preservando el redirect_uri actual del asistente
         const form = new URLSearchParams();
         form.set("grant_type", "authorization_code");
         form.set("code", code);
         form.set("redirect_uri", redirect_uri);
 
-        const resp = await fetch(API_BASE + "/oauth/access_token", {
-            method: "POST",
-            headers,
-            body: form.toString(),
-            redirect: "manual"
-        });
-
-        // 4) Devuelve tal cual
+        const resp = await fetch(API_BASE + "/oauth/access_token", { method: "POST", headers, body: form.toString(), redirect: "manual" });
         for (const [k, v] of resp.headers.entries()) res.setHeader(k, v);
         const buf = Buffer.from(await resp.arrayBuffer());
         res.status(resp.status).send(buf);
     } catch (err) {
+        console.error("TOKEN ERROR ▶︎", err);
         res.status(502).json({ error: "proxy_token_error", detail: String(err) });
     }
 });
 
-// -------- Authorize: normaliza y REDIRIGE (no proxyear UI) --------
+// 1) LOG en /oauth/authorize para ver qué envía ChatGPT
 app.all("/oauth/authorize", (req, res) => {
     const u = new URL(req.url, PROXY_ORIGIN);
-    ensureAuthorizeParams(u);
-    const target = `${APP_BASE}${u.pathname}?${u.searchParams.toString()}`;
+    const q = u.searchParams;
+    // NO forzamos redirect_uri si ya viene; solo rellenamos si falta
+    if (!q.get("client_id") || !q.get("client_id").trim()) q.set("client_id", CLIENT_ID);
+    if (!q.get("redirect_uri") || !q.get("redirect_uri").trim()) q.set("redirect_uri", process.env.GPT_REDIRECT_URI || "");
+    if (!q.get("response_type")) q.set("response_type", "code");
+
+    console.log("AUTHZ ▶︎", {
+        client_id: q.get("client_id"),
+        redirect_uri: q.get("redirect_uri"),
+        state_len: (q.get("state") || "").length
+    });
+
+    const target = `${APP_BASE}${u.pathname}?${q.toString()}`;
     return res.redirect(302, target);
 });
 
