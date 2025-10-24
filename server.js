@@ -122,12 +122,66 @@ app.all("/oauth/access_token", async (req, res) => {
     res.status(resp.status).send(buf);
 });
 
-// -------- Authorize: normaliza y REDIRIGE (no proxyear UI) --------
-app.all("/oauth/authorize", (req, res) => {
-    const u = new URL(req.url, PROXY_ORIGIN);
-    ensureAuthorizeParams(u);
-    const target = `${APP_BASE}${u.pathname}?${u.searchParams.toString()}`;
-    return res.redirect(302, target);
+// --- Token: fuerza POST + Basic + body form completo ---
+app.all("/oauth/access_token", async (req, res) => {
+    try {
+        const headers = {};
+        // UA obligatorio
+        headers["User-Agent"] = UA;
+        // Siempre form-urlencoded
+        headers["Content-Type"] = "application/x-www-form-urlencoded";
+        headers["Accept"] = "application/json";
+
+        // Authorization: Basic <client_id:client_secret>
+        if (!CLIENT_SECRET) {
+            return res.status(500).json({ error: "OWNERREZ_CLIENT_SECRET not configured" });
+        }
+        const basic = Buffer.from(`${CLIENT_ID}:${CLIENT_SECRET}`).toString("base64");
+        headers["Authorization"] = `Basic ${basic}`;
+
+        // Extrae el "code" de body (si vino) o de la query (por si GPT lo envió allí)
+        let code = "";
+        // Body original (si llegó en form)
+        let bodyRaw = req.body ? req.body.toString("utf8") : "";
+        if (bodyRaw && bodyRaw.includes("=")) {
+            const search = new URLSearchParams(bodyRaw);
+            code = search.get("code") || "";
+        }
+        // Si no hay code en body, intenta querystring
+        if (!code) {
+            const u = new URL(req.url, PROXY_ORIGIN);
+            code = u.searchParams.get("code") || "";
+        }
+
+        if (!code) {
+            // Sin code no hay token; devolvemos 400 informativo para depurar
+            return res.status(400).json({ error: "missing_authorization_code" });
+        }
+
+        // Construye SIEMPRE el body esperado por OwnerRez
+        const form = new URLSearchParams();
+        form.set("grant_type", "authorization_code");
+        form.set("code", code);
+        form.set("redirect_uri", REDIRECT_URI);
+
+        // (Opcional) Algunos servidores aceptan también client creds en el form:
+        form.set("client_id", CLIENT_ID);
+        form.set("client_secret", CLIENT_SECRET);
+
+        const resp = await fetch(API_BASE + "/oauth/access_token", {
+            method: "POST",
+            headers,
+            body: form.toString(),
+            redirect: "manual"
+        });
+
+        // Proxy de respuesta tal cual
+        for (const [k, v] of resp.headers.entries()) res.setHeader(k, v);
+        const buf = Buffer.from(await resp.arrayBuffer());
+        res.status(resp.status).send(buf);
+    } catch (err) {
+        res.status(502).json({ error: "proxy_token_error", detail: String(err) });
+    }
 });
 
 // -------- Web → redirección; API (/v2/...) → proxy --------
