@@ -1,6 +1,6 @@
 // server.js
 import express from "express";
-import { URL } from "url";
+import { URL, URLSearchParams } from "url";
 
 const app = express();
 
@@ -11,17 +11,17 @@ const API_BASE = "https://api.ownerrez.com";
 
 const UA = "DenOfSin Assistant/1.0 (c_otce6nb6iejzqvmtk7hiaunuhtlwyq6g)";
 
-// Credenciales OAuth (desde entorno si es posible)
-const FALLBACK_CLIENT_ID = process.env.OWNERREZ_CLIENT_ID || "c_otce6nb6iejzqvmtk7hiaunuhtlwyq6g";
-const OWNERREZ_CLIENT_SECRET = process.env.OWNERREZ_CLIENT_SECRET || ""; // <-- PÓNLO EN RENDER
-const FALLBACK_REDIRECT =
+// Credenciales OAuth (pon el secret en Render → Environment)
+const CLIENT_ID = process.env.OWNERREZ_CLIENT_ID || "c_otce6nb6iejzqvmtk7hiaunuhtlwyq6g";
+const CLIENT_SECRET = process.env.OWNERREZ_CLIENT_SECRET || ""; // <-- IMPORTANTE
+const REDIRECT_URI =
     process.env.GPT_REDIRECT_URI ||
     "https://chat.openai.com/aip/g-4c7fcb8735f81f7eda9337dc66fdc10c530695c2/oauth/callback";
 
 // Salud
 app.get("/__health", (req, res) => res.json({ ok: true }));
 
-// Acepta cualquier body (incluye x-www-form-urlencoded)
+// Acepta cualquier body (token usa x-www-form-urlencoded)
 app.use(express.raw({ type: () => true, limit: "10mb" }));
 
 // -------- Utils --------
@@ -32,14 +32,14 @@ function cloneHeaders(req) {
         if (lk === "host" || lk === "content-length" || lk === "user-agent") continue;
         headers[k] = v;
     }
-    headers["User-Agent"] = UA;
+    headers["User-Agent"] = UA; // obligatorio en OwnerRez API
     return headers;
 }
 
 function ensureAuthorizeParams(u) {
     const q = u.searchParams;
-    if (!q.get("client_id") || q.get("client_id").trim() === "") q.set("client_id", FALLBACK_CLIENT_ID);
-    if (!q.get("redirect_uri") || q.get("redirect_uri").trim() === "") q.set("redirect_uri", FALLBACK_REDIRECT);
+    if (!q.get("client_id") || q.get("client_id").trim() === "") q.set("client_id", CLIENT_ID);
+    if (!q.get("redirect_uri") || q.get("redirect_uri").trim() === "") q.set("redirect_uri", REDIRECT_URI);
     if (!q.get("response_type")) q.set("response_type", "code");
 }
 
@@ -57,26 +57,62 @@ async function proxyGeneric(req, res, targetBase) {
     res.status(resp.status).send(buf);
 }
 
-// --- Token: injerta Authorization Basic si falta ---
+// -------- Token: fuerza Basic y body form con client creds --------
 app.all("/oauth/access_token", async (req, res) => {
     const targetUrl = API_BASE + req.originalUrl;
 
+    // 1) Cabeceras base + UA
     const headers = cloneHeaders(req);
 
-    // Asegura Content-Type correcto si GPTBuilder lo omite
-    if (!headers["content-type"]) headers["content-type"] = "application/x-www-form-urlencoded";
+    // 2) Content-Type correcto
+    const ctKey = Object.keys(headers).find(k => k.toLowerCase() === "content-type");
+    if (!ctKey) headers["Content-Type"] = "application/x-www-form-urlencoded";
 
-    // Si no viene Authorization Basic, lo creamos con client_id:secret
-    const hasAuth = Object.keys(headers).some(k => k.toLowerCase() === "authorization");
-    if (!hasAuth && OWNERREZ_CLIENT_SECRET) {
-        const basic = Buffer.from(`${FALLBACK_CLIENT_ID}:${OWNERREZ_CLIENT_SECRET}`).toString("base64");
-        headers["Authorization"] = `Basic ${basic}`;
+    // 3) Authorization: Basic <client_id:client_secret> (siempre, sobreescribe)
+    if (!CLIENT_SECRET) {
+        return res.status(500).json({ error: "OWNERREZ_CLIENT_SECRET not configured" });
+    }
+    const basic = Buffer.from(`${CLIENT_ID}:${CLIENT_SECRET}`).toString("base64");
+    headers["Authorization"] = `Basic ${basic}`;
+
+    // 4) Body: asegurar que incluya client_id, client_secret y redirect_uri (además del code/grant_type)
+    let bodyOut;
+    const isGetOrHead = req.method === "GET" || req.method === "HEAD";
+    if (!isGetOrHead) {
+        const incomingCT = (ctKey ? headers[ctKey] : "").toLowerCase();
+
+        if (incomingCT.includes("application/x-www-form-urlencoded")) {
+            const raw = req.body ? req.body.toString("utf8") : "";
+            const params = new URLSearchParams(raw || "");
+            if (!params.get("client_id")) params.set("client_id", CLIENT_ID);
+            if (!params.get("client_secret")) params.set("client_secret", CLIENT_SECRET);
+            if (!params.get("redirect_uri")) params.set("redirect_uri", REDIRECT_URI);
+            // Asegura grant_type/code si por alguna razón faltaran (GPTBuilder los pone, pero robustecemos)
+            if (!params.get("grant_type")) params.set("grant_type", "authorization_code");
+            bodyOut = params.toString();
+        } else {
+            // Si no es form-urlencoded, transformamos a form
+            const params = new URLSearchParams();
+            params.set("grant_type", "authorization_code");
+            // No tenemos el code aquí si GPT no lo mandó en body; mantenemos pass-through si vino en body binario
+            // Para máxima compatibilidad, reenviamos el body original si existe:
+            if (req.body && req.body.length > 0) {
+                bodyOut = req.body; // deja pasar (pero con Basic header ya correcto)
+            } else {
+                // En caso extremo, mandamos sólo los creds (OwnerRez rechazará si no hay code, pero al menos creds correctos)
+                params.set("client_id", CLIENT_ID);
+                params.set("client_secret", CLIENT_SECRET);
+                params.set("redirect_uri", REDIRECT_URI);
+                bodyOut = params.toString();
+                headers["Content-Type"] = "application/x-www-form-urlencoded";
+            }
+        }
     }
 
     const init = {
         method: req.method,
         headers,
-        body: req.method === "GET" || req.method === "HEAD" ? undefined : req.body,
+        body: isGetOrHead ? undefined : bodyOut,
         redirect: "manual"
     };
 
@@ -86,7 +122,7 @@ app.all("/oauth/access_token", async (req, res) => {
     res.status(resp.status).send(buf);
 });
 
-// --- Authorize: normaliza y REDIRIGE a la web (no proxyear UI) ---
+// -------- Authorize: normaliza y REDIRIGE (no proxyear UI) --------
 app.all("/oauth/authorize", (req, res) => {
     const u = new URL(req.url, PROXY_ORIGIN);
     ensureAuthorizeParams(u);
@@ -94,7 +130,7 @@ app.all("/oauth/authorize", (req, res) => {
     return res.redirect(302, target);
 });
 
-// --- Web → redirección; API (/v2/...) → proxy ---
+// -------- Web → redirección; API (/v2/...) → proxy --------
 function isWebPath(path) {
     return (
         path.startsWith("/oauth/") ||
